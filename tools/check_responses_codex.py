@@ -1,6 +1,6 @@
 """Codex CLI integration against native Strata. Provider overrides are process-only.
 
-Uses a fresh temporary Codex home and the read-only get_goal tool round trip.
+Uses a fresh temporary Codex home and a read-only image-tool round trip.
 Pass --catalog for the local model's existing Codex model metadata.
 """
 import argparse
@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import urllib.request
+
+from PIL import Image
 
 
 def main():
@@ -33,6 +35,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="responses-codex-", dir=work) as temp:
         home = Path(temp) / "home"
         home.mkdir()
+        fixture = Path(temp) / "responses-image.png"
+        Image.new("RGB", (64, 64), (255, 0, 0)).save(fixture)
         config = {"model_provider": "strata_test", "model_reasoning_effort": "none", "notify": [],
                   "web_search": "disabled", "model_providers.strata_test.name": "Strata native Responses test",
                   "model_providers.strata_test.base_url": args.base_url.rstrip("/"),
@@ -55,9 +59,11 @@ def main():
                "--sandbox", "read-only", "-C", temp, "-m", model, "--json"]
         for k, v in config.items():
             cmd += ["-c", k + "=" + json.dumps(v)]
-        prompt = ("Use functions.exec once to run this JavaScript: text(await tools.get_goal({})); " if args.code_mode else
-                  "Call get_goal once to read the current goal. ")
-        cmd.append(prompt + "Do not create or update a goal. Then reply exactly READY. "
+        image_args = json.dumps({"path": str(fixture)})
+        prompt = ("Use functions.exec once to run this JavaScript: await tools.view_image(" + image_args +
+                  '); text("IMAGE_READ"); ' if args.code_mode else
+                  "Call view_image once with these arguments: " + image_args + ". ")
+        cmd.append(prompt + "Then reply exactly READY. "
                    "Do not call terminal tools or change any files.")
         result = subprocess.run(cmd, env={**os.environ, "CODEX_HOME": str(home)}, capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=args.timeout)
@@ -70,9 +76,11 @@ def main():
         items = [e.get("item", {}) for e in events if e.get("type") == "item.completed"]
         messages = [item.get("text", "") for item in items if item.get("type") == "agent_message"]
         requests = request_count() - before
-        # The CLI currently omits goal-tool items from JSON output. A tool call and
-        # its result require two real model requests, followed by the exact answer.
-        ok = result.returncode == 0 and requests == 2 and bool(messages) and messages[-1].strip() == "READY"
+        # Some internal tools do not produce JSON item events. A tool call and its
+        # result still require two real model requests. Reject CLI execution errors.
+        tool_error = "codex_core::tools::router: error=" in result.stderr
+        ok = result.returncode == 0 and requests == 2 and not tool_error and bool(messages) and \
+             messages[-1].strip().rstrip(".") == "READY"
         print(json.dumps({"ok": ok, "model": model, "exit_code": result.returncode,
                           "code_mode": args.code_mode,
                           "engine_requests": requests, "last_message": messages[-1] if messages else None,

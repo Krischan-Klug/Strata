@@ -46,6 +46,7 @@ read-only internal tool round trip against the running engine. Pass `--cli`,
 model catalog. `--code-mode` changes tool_mode only in a temporary test catalog.
 The test does not edit the real Codex configuration. Run it with no other active
 model requests: it uses the engine request counter to verify the two-turn cycle.
+The CLI reads a generated test image; no shell execution or goal state is needed.
 
 ## Capability and test matrix
 
