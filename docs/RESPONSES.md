@@ -22,6 +22,7 @@
 - Sampling settings, output token limits and token usage, including reasoning.
 - Reasoning effort, reasoning text, encrypted replay and model-generated summaries.
 - Function tools, namespaces and custom tools with text, regex or Lark input.
+- Client-side shell, patching and computer use through function/custom tools, including screenshot results.
 - Tool selection, parallel calls and tool-result replay through `call_id`.
 - Structured output through `text.format`: `text`, `json_object` or `json_schema`.
 - Stored responses, `previous_response_id`, background generation and cancellation.
@@ -53,7 +54,8 @@
 
 ## Unsupported
 
-- Hosted tools and services: web/file search, code interpreter, shell/computer use, image generation, cloud prompts and conversation resources.
+- Hosted tools and services: web/file search, code interpreter, image generation, cloud prompts and conversation resources.
+- Native `computer`, `computer_use_preview`, `shell`, `local_shell` and `apply_patch` tool types and their call/output items. Client implementations exposed as function/custom tools are supported.
 - Provider-executed remote MCP and server-executed tool search. Client-owned tools use function or custom tool calls.
 - Audio/video/file-ID inputs, logprobs, cache-retention tiers, automatic context management, WebSockets and event obfuscation.
 - Unsupported request options return parameter-specific errors.
