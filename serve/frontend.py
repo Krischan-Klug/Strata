@@ -235,6 +235,7 @@ class Event:
     kind: str                     # "reasoning" | "content" | "tool_call"
     text: str = ""
     call: ToolCall | None = None
+    complete: bool = True           # false when EOF closes a partial tool-call scan
 
 
 THINK_END = "</think>"
@@ -532,7 +533,7 @@ class OutputParser:
         if self.state == "call" and self.stream_tools and self.scall is not None:
             out += self._scan()                 # the output ended inside a call that was already announced
             out += self._close_scan()
-            out.append(Event("tool_call", call=self.scall))
+            out.append(Event("tool_call", call=self.scall, complete=False))
             self.buf = ""
             self._reset_scan()
             return out

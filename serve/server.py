@@ -3,7 +3,8 @@
     python -m serve.server --engine mock --port 8095            (a scripted engine, for clients and tests)
     python -m serve.server --engine strata --config strata.json --port 8080   (the real engine, resident)
 
-Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
+Endpoints: POST /v1/responses (native Responses; see docs/RESPONSES.md), POST /v1/chat/completions
+(OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
 non-stream), GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
@@ -48,6 +49,8 @@ from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_mess
                             images_of, openai_to_messages)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve.winjob import contain  # noqa: E402
+from serve.responses import Responses  # noqa: E402
+from serve.responses.http import route as responses_route  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -716,7 +719,7 @@ class Service:
             "cache_max_tokens": ctx,
             "context": {"native": ctx, "max_positions": ctx},
             "concurrency": {"serving": 1, "requested": 1},       # one request at a time; more wait their turn
-            "dialects": ["/v1/chat/completions", "/v1/messages"],
+            "dialects": ["/v1/responses", "/v1/chat/completions", "/v1/messages"],
             "vision": {"enabled": images, "available": images, "error": None},
             "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
                          "last_request_at": int(last_at) if last_at else None},
@@ -825,7 +828,7 @@ class Service:
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
-        detok, n, finish = Detokenizer(self.tok), 0, "length"
+        detok, n, reasoning_n, finish = Detokenizer(self.tok), 0, 0, "length"
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
@@ -866,6 +869,8 @@ class Service:
                             raw_ids.append(t)
                             break
                         raw_ids.append(t)
+                        if parser.state == "reasoning":
+                            reasoning_n += 1
                         evs = parser.feed(detok.push(t))
                         self._note(n, evs)
                         last_print = self._progress(last_print)
@@ -939,7 +944,7 @@ class Service:
         for ev in parser.finish():
             yield "event", ev
         yield "done", {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
-                       "timings": timings}
+                       "reasoning_tokens": reasoning_n, "timings": timings}
 
 
 def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
@@ -1248,6 +1253,8 @@ def anthropic_collect(events) -> dict:
 
 # ------------------------------------------------------------------------------------------------ HTTP
 def make_handler(svc: Service):
+    responses = Responses(svc)
+    svc.responses = responses
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
@@ -1273,6 +1280,8 @@ def make_handler(svc: Service):
             return False
 
         def do_GET(self):
+            if responses_route(self, responses):
+                return
             path = self.path.split("?")[0].rstrip("/")
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
@@ -1370,6 +1379,8 @@ def make_handler(svc: Service):
                 self._json(404, {"error": {"message": "not found"}})
 
         def do_POST(self):
+            if responses_route(self, responses):
+                return
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
@@ -1413,6 +1424,10 @@ def make_handler(svc: Service):
             if version:
                 props["build_info"] = "Strata " + str(version)
             self._json(200, props)
+
+        def do_DELETE(self):
+            if not responses_route(self, responses):
+                self._json(404, {"error": {"message": "not found"}})
 
         def _own_page(self, what) -> bool:
             """Only JSON (a form or a "simple" cross-site request can't send it without a CORS preflight, which this
@@ -1779,7 +1794,7 @@ def main() -> int:
         atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
-    print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+    print(f"ready: http://{here}:{a.port}/v1  (Responses: /v1/responses, OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
     print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
