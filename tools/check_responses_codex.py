@@ -60,8 +60,8 @@ def main():
         for k, v in config.items():
             cmd += ["-c", k + "=" + json.dumps(v)]
         image_args = json.dumps({"path": str(fixture)})
-        prompt = ("Use functions.exec once to run this JavaScript: await tools.view_image(" + image_args +
-                  '); text("IMAGE_READ"); ' if args.code_mode else
+        prompt = ("Use functions.exec once to run this JavaScript: const result = await tools.view_image(" + image_args +
+                  '); image(result.image_url); text("IMAGE_READ"); ' if args.code_mode else
                   "Call view_image once with these arguments: " + image_args + ". ")
         cmd.append(prompt + "Then reply exactly READY. "
                    "Do not call terminal tools or change any files.")

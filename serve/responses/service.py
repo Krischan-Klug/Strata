@@ -13,7 +13,7 @@ from serve.frontend import Event
 from .constraints import loads, validate_schema
 from .errors import APIError
 from .events import Output, response_object, uid
-from .input import items, prepare_request
+from .input import REQUEST_FIELDS, fields, items, prepare_request
 from .store import Record, Store, TERMINAL
 
 
@@ -71,23 +71,24 @@ class Responses:
         req = deepcopy(req)
         if not isinstance(req, dict):
             raise APIError("request must be an object")
+        fields(req, REQUEST_FIELDS)
         req = {k: v for k, v in req.items() if v is not None}
-        history = self._history(req)
-        spec = prepare_request(req, self.service.model, history, self.decrypt)
         # Honor the service's shared defaults without applying Chat Completions field aliases.
         if "max_output_tokens" not in req and self.service.shared.get("max_tokens", 0) > 0:
             req["max_output_tokens"] = self.service.shared["max_tokens"]
-        if not req.get("reasoning") and self.service.shared.get("reasoning_effort"):
-            req["reasoning"] = {"effort": self.service.shared["reasoning_effort"]}
-            from serve.frontend import effort_kwargs
-            spec["kw"] = effort_kwargs(req["reasoning"]["effort"])
+        if isinstance(req.get("reasoning", {}), dict) and self.service.shared.get("reasoning_effort"):
+            req.setdefault("reasoning", {}).setdefault("effort", self.service.shared["reasoning_effort"])
+        history = self._history(req)
+        spec = prepare_request(req, self.service.model, history, self.decrypt)
         spec.update(req=req, history=history)
         return spec
 
-    def _prepare(self, spec):
+    def _prepare(self, spec, compaction=False):
         try:
             ids, thinking, budget = self.service.prepare(spec["messages"], spec["template_tools"], spec["kw"],
-                                                        spec["req"].get("max_output_tokens"))
+                                                        None if compaction else spec["req"].get("max_output_tokens"))
+            if compaction:
+                budget = min(budget, 1024)
             if len(ids) + budget + 8 > self.service.engine.max_context:
                 raise ValueError("prompt leaves no room to answer in the context")
             return ids, thinking, budget
@@ -386,7 +387,7 @@ class Responses:
         self.store.allocate(record)
         run = None
         try:
-            ids, _, room = self._prepare(spec)
+            ids, _, room = self._prepare(spec, compaction=True)
             run = self.service.run(ids, False, None, min(room, 1024), {"temperature": 0}, record.cancel)
             chunks, done = [], {}
             for kind, ev in run:

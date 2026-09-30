@@ -181,6 +181,61 @@ eof_line: "*** End of File" LF
         self.assertTrue(any(e["type"] == "response.reasoning_text.done" for e in events))
         self.assertEqual(events[-1]["response"]["output"][0]["content"][0]["text"], "work")
 
+    def test_reasoning_context_keeps_active_tool_turn_and_filters_old_turns(self):
+        self.start("DONE")
+        encrypted = self.svc.responses.encrypt
+        history = [{"role": "user", "content": "Earlier question"},
+                   {"type": "reasoning", "encrypted_content": encrypted("OLD_THOUGHT")},
+                   {"role": "assistant", "content": "Earlier answer", "phase": "final_answer"},
+                   {"role": "user", "content": "Current question"},
+                   {"type": "reasoning", "encrypted_content": encrypted("CURRENT_THOUGHT")},
+                   {"type": "function_call", "name": "lookup", "call_id": "c", "arguments": '{"city":"Berlin"}'},
+                   {"type": "function_call_output", "call_id": "c", "output": "sunny"}]
+        for context, effective, keeps_old in [("current_turn", "current_turn", False),
+                                               ("all_turns", "all_turns", True),
+                                               ("auto", "all_turns", True),
+                                               (None, "all_turns", True),
+                                               ("last_turn", "current_turn", False)]:
+            with self.subTest(context=context):
+                result = self.create(input=history, tools=[FUNCTION], reasoning={"effort": "none", "context": context, "mode": None})
+                prompt = self.svc.tok.decode(self.engine.last_prompt)
+                self.assertEqual("OLD_THOUGHT" in prompt, keeps_old)
+                self.assertIn("CURRENT_THOUGHT", prompt)
+                self.assertEqual(result.reasoning.context, effective)
+                stored = self.client.responses.input_items.list(result.id, order="asc")
+                self.assertEqual(stored.data[2].phase, "final_answer")
+
+    def test_orphaned_reasoning_does_not_cross_user_boundary(self):
+        self.start()
+        self.create(input=[{"type": "reasoning", "encrypted_content": self.svc.responses.encrypt("ORPHAN")},
+                           {"role": "user", "content": "New question"}, {"role": "assistant", "content": "Answer"}])
+        self.assertNotIn("ORPHAN", self.svc.tok.decode(self.engine.last_prompt))
+
+    def test_shared_reasoning_default_respects_context_and_explicit_effort(self):
+        self.start("thought</think>\n\nDONE")
+        self.svc.shared["reasoning_effort"] = "low"
+        result = self.create(reasoning={"context": "current_turn", "mode": "standard"})
+        self.assertEqual(result.reasoning.effort, "low")
+        self.assertEqual(result.reasoning.context, "current_turn")
+        result = self.create(reasoning={"effort": "none"})
+        self.assertEqual(result.reasoning.effort, "none")
+
+    def test_deprecated_summary_alias_returns_canonical_summary(self):
+        self.start(["thought</think>\n\nDONE", "Brief summary."])
+        result = self.create(reasoning={"effort": "low", "generate_summary": "concise"})
+        self.assertEqual(result.reasoning.summary, "concise")
+        self.assertEqual(result.output[0].summary[0].text, "Brief summary.")
+
+    def test_metadata_and_client_identifiers_round_trip(self):
+        self.start()
+        result = self.create(metadata={"task": "local"}, prompt_cache_key="cache-key", safety_identifier="user-key",
+                             extra_body={"user": "legacy-user", "client_metadata": {"client": "test"}})
+        for response in (result, self.client.responses.retrieve(result.id)):
+            self.assertEqual(response.metadata, {"task": "local"})
+            self.assertEqual(response.prompt_cache_key, "cache-key")
+            self.assertEqual(response.safety_identifier, "user-key")
+            self.assertEqual(response.user, "legacy-user")
+
     def test_reasoning_summary_is_generated_and_accounted(self):
         self.start(["detailed thoughts</think>\n\nDONE", "A short summary."])
         events = self.events(reasoning={"effort": "low", "summary": "concise"})
@@ -209,6 +264,17 @@ eof_line: "*** End of File" LF
         prompt = self.svc.tok.decode(self.engine.last_prompt)
         self.assertIn("remember Berlin", prompt)
         self.assertNotIn("STALE_PREFIX", prompt)
+        self.assertEqual(self.svc.responses.store.active, 0)
+
+    def test_compaction_uses_remaining_context_instead_of_shared_answer_budget(self):
+        self.start(["Compact state.", "DONE"], context=1100)
+        self.svc.shared["max_tokens"] = 1000
+        history = [{"role": "user", "content": "Remember Berlin " + "x" * 250}]
+        with self.assertRaises(BadRequestError):
+            self.create(input=history, max_output_tokens=1000)
+        result = self.client.responses.compact(model="test-model", input=history)
+        self.assertTrue(result.output[0].encrypted_content)
+        self.assertEqual(self.engine.turns, 1)
         self.assertEqual(self.svc.responses.store.active, 0)
 
     def test_client_tool_search_loads_deferred_tools_on_replay(self):
@@ -421,6 +487,61 @@ eof_line: "*** End of File" LF
             with self.subTest(options=options), self.assertRaises(BadRequestError):
                 self.create(**options)
         self.assertEqual(self.engine.last_prompt, [])
+
+    def test_invalid_nested_values_return_parameter_errors_before_stream_headers(self):
+        self.start()
+        cases = [("reasoning", []), ("reasoning", {"effort": "made-up"}), ("reasoning", {"effort": False}),
+                 ("reasoning", {"context": "invalid"}), ("reasoning", {"summary": "auto", "generate_summary": "concise"}),
+                 ("metadata", []), ("metadata", ""), ("tools", {}), ("tools", [{"type": []}]), ("include", ""),
+                 ("text", []), ("text", {"format": []}), ("text", {"format": {}}), ("client_metadata", []),
+                 ("stream_options", []), ("stream_options", {"include_obfuscation": 0}),
+                 ("tools", [{"type": "function", "name": "lookup", "parameters": []}]),
+                 ("tool_choice", {"type": "allowed_tools", "tools": [{"type": "custom", "name": "lookup"}]}),
+                 ("input", [{"role": "user", "content": "hi", "phase": "commentary"}]),
+                 ("input", [{"type": "reasoning", "content": [False]}])]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                status, raw = self.wire("/v1/responses", {"model": "test-model", "input": "hi", "tools": [FUNCTION],
+                                                        "stream": True, field: value})
+                self.assertEqual(status, 400, raw)
+                error = json.loads(raw)["error"]
+                self.assertTrue(error["param"].startswith(field), error)
+        self.assertEqual(self.engine.last_prompt, [])
+
+    def test_unavailable_features_are_explicitly_rejected_without_inference(self):
+        self.start()
+        cases = [({"conversation": None}, "conversation"), ({"prompt": {"id": "p"}}, "prompt"),
+                 ({"reasoning": {"mode": "pro"}}, "reasoning.mode"),
+                 ({"context_management": [{"type": "compaction", "compact_threshold": 1000}]}, "context_management"),
+                 ({"truncation": "auto"}, "truncation"), ({"service_tier": "priority"}, "service_tier"),
+                 ({"prompt_cache_retention": "24h"}, "prompt_cache_retention"), ({"top_logprobs": 1}, "top_logprobs"),
+                 ({"stream_options": {"include_obfuscation": True}}, "stream_options.include_obfuscation"),
+                 ({"tools": [dict(FUNCTION, output_schema={})]}, "tools[0].output_schema"),
+                 ({"tools": [dict(FUNCTION, allowed_callers=["code_interpreter"])]}, "tools[0].allowed_callers"),
+                 ({"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file_x"}]}]},
+                  "input[0].content[0].file_id")]
+        for kind in ("web_search", "file_search", "code_interpreter", "image_generation", "computer",
+                     "computer_use_preview", "shell", "local_shell", "apply_patch", "mcp"):
+            cases.append(({"tools": [{"type": kind}]}, "tools[0].type:" + kind))
+        cases.append(({"tools": [{"type": "tool_search", "execution": "server"}]}, "tools[0].execution:server"))
+        for kind in ("input_file", "input_audio", "input_video"):
+            cases.append(({"input": [{"role": "user", "content": [{"type": kind}]}]}, "input[0].content[0].type:" + kind))
+        for kind in ("computer_call", "computer_call_output", "shell_call", "shell_call_output", "local_shell_call",
+                     "local_shell_call_output", "apply_patch_call", "apply_patch_call_output", "mcp_call", "configuration_update"):
+            cases.append(({"input": [{"type": kind}]}, "input[0].type:" + kind))
+        for body, param in cases:
+            with self.subTest(param=param):
+                status, raw = self.wire("/v1/responses", {"model": "test-model", "input": "hi", "stream": True, **body})
+                self.assertEqual(status, 400, raw)
+                error = json.loads(raw)["error"]
+                self.assertEqual(error["code"], "unsupported_parameter")
+                self.assertEqual(error["param"], param)
+        self.assertEqual(self.engine.last_prompt, [])
+
+    def test_empty_function_schema_is_preserved(self):
+        self.start(call())
+        self.create(tools=[dict(FUNCTION, parameters={})])
+        self.assertIn('"parameters": {}', self.svc.tok.decode(self.engine.last_prompt))
 
     def test_unknown_model_rejected(self):
         self.start()

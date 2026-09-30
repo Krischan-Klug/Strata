@@ -10,7 +10,7 @@ def uid(prefix):
 
 
 def response_object(req, definitions):
-    return {"id": uid("resp"), "object": "response", "created_at": time.time(),
+    result = {"id": uid("resp"), "object": "response", "created_at": time.time(),
             "status": "queued" if req.get("background") else "in_progress", "background": bool(req.get("background")),
             "error": None, "incomplete_details": None, "instructions": req.get("instructions"),
             "model": req["model"], "output": [], "parallel_tool_calls": req.get("parallel_tool_calls", True),
@@ -20,6 +20,10 @@ def response_object(req, definitions):
             "max_output_tokens": req.get("max_output_tokens"), "temperature": req.get("temperature", 0),
             "top_p": req.get("top_p", 1), "truncation": "disabled", "metadata": req.get("metadata") or {},
             "usage": None, "service_tier": "default"}
+    for field in ("prompt_cache_key", "safety_identifier", "user"):
+        if field in req:
+            result[field] = req[field]
+    return result
 
 
 class Output:

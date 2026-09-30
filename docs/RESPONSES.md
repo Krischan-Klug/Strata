@@ -21,6 +21,7 @@
 - Streaming through SSE with item IDs and numbered events.
 - Sampling settings, output token limits and token usage, including reasoning.
 - Reasoning effort, reasoning text, encrypted replay and model-generated summaries.
+- Reasoning context: `current_turn` preserves the active tool round; `all_turns` preserves earlier reasoning too. `auto` uses the local template default, `all_turns`; responses report the effective setting.
 - Function tools, namespaces and custom tools with text, regex or Lark input.
 - Client-side shell, patching and computer use through function/custom tools, including screenshot results.
 - Tool selection, parallel calls and tool-result replay through `call_id`.
@@ -48,6 +49,8 @@
 - `store` defaults to `true`. Background generation requires storage; `store: false` retains no response or replay history.
 - Resume background events through `GET /v1/responses/{id}?stream=true&starting_after=<sequence_number>`.
 - Use compaction's returned `output` as the next request's history. Compaction summarizes the conversation; automatic compaction and input truncation are unsupported.
+- Compaction uses the remaining context, capped at 1,024 output tokens. Context overflow returns `400` with `context_length_exceeded`.
+- Assistant `phase` is retained in history; cache/safety identifiers are echoed in responses.
 - State is process-local and cleared on restart. Defaults: 128 records, 64 MiB total retention, 16 MiB per record, one-hour idle expiry and four active requests. Completed records are evicted under pressure.
 - Request bodies are limited to 8 MiB (`413`); exhausted admission or storage capacity returns `429`.
 - Set `STRATA_RESPONSES_KEY` to a stable Fernet key to replay encrypted reasoning and compaction across restarts. Stored response IDs remain process-local.
@@ -57,8 +60,9 @@
 - Hosted tools and services: web/file search, code interpreter, image generation, cloud prompts and conversation resources.
 - Native `computer`, `computer_use_preview`, `shell`, `local_shell` and `apply_patch` tool types and their call/output items. Client implementations exposed as function/custom tools are supported.
 - Provider-executed remote MCP and server-executed tool search. Client-owned tools use function or custom tool calls.
-- Audio/video/file-ID inputs, logprobs, cache-retention tiers, automatic context management, WebSockets and event obfuscation.
-- Unsupported request options return parameter-specific errors.
+- File/audio/video inputs, logprobs, cache-retention tiers, automatic context management, WebSockets and event obfuscation.
+- Pro reasoning mode and mid-conversation configuration updates.
+- Unsupported request options return `400` with `unsupported_parameter` and the offending `param`, before SSE starts. Client permission denials return through ordinary tool outputs.
 
 ## Codex
 
@@ -90,3 +94,4 @@ supports_websockets = false
 ```
 
 - Codex CLI integration: `tools/check_responses_codex.py --help` lists executable, model catalog and Code Mode options.
+- Scripted Codex client tests: set `STRATA_CODEX_CLI` and `STRATA_CODEX_CATALOG`; run `python -m unittest serve.test_responses_codex`. Terminal tests additionally require `STRATA_CODEX_EXECUTION_TESTS=1` and permission in the client.
